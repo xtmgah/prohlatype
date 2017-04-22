@@ -348,7 +348,17 @@ module type Ring = sig
 
 end (* Ring *)
 
-type emissions = ((BaseState.t * int) * Alleles.Set.set) list
+type alleles_set  =
+  | Universe
+  | Specific of Alleles.Set.set
+
+let wrap_as s =
+  if Alleles.Set.is_full s then
+    Universe
+  else 
+    Specific s
+
+type emissions = ((BaseState.t * int) * alleles_set) list
 (* For every k there are 3 possible states. *)
 
 type 'a cell =
@@ -357,8 +367,8 @@ type 'a cell =
   ; delete  : 'a
   }
 
-type 'a entry = (Alleles.Set.set * 'a cell) list
-type 'a final_entry = (Alleles.Set.set * 'a) list
+type 'a entry = (alleles_set * 'a cell) list
+type 'a final_entry = (alleles_set * 'a) list
 
 type workspace =
   { mutable forward             : float entry array array
@@ -388,10 +398,16 @@ type 'a fwd_recurrences =
   ; combine   : into:'a array -> 'a array -> unit
   }
 
+let union a1 a2 = match a1, a2 with
+  | Universe,     _           -> Universe
+  | _,            Universe    -> Universe
+  | Specific s1,  Specific s2 -> let u, a = Alleles.Set.union_all s1 s2 in
+                                 if a then Universe else Specific u
+
 (* Union, tail recursive. *)
 let mutate_or_add value allele_set lst =
   let rec loop acc = function
-    | (s, v) :: t when v = value -> acc @ (Alleles.Set.union s allele_set, v) :: t
+    | (s, v) :: t when v = value -> acc @ (union s allele_set, v) :: t
     | h :: t                     -> loop (h :: acc) t
     | []                         -> (allele_set, value) :: acc
   in
@@ -413,25 +429,43 @@ let mutate_or_add value allele_set lst =
   else
     (Alleles.Set.copy new_allele_set, value) :: assoc *)
 
-let debug_set_assoc = ref false
 
 let set_assoc to_find slst =
-  if !debug_set_assoc then printf "set_assoc %d\n" (List.length slst);
-  let to_s = Alleles.Set.to_string in
+  let to_s = function
+    | Universe   -> "universe"
+    | Specific s -> sprintf "Specific: %s" (Alleles.Set.to_string s)
+  in
   let rec loop to_find acc = function
-    | []          -> invalid_argf "Still missing! %s after looking in: %s"
+    | []          -> invalid_argf "Still missing! %s\n\n after looking in: %s"
                       (to_s to_find) (List.map slst ~f:(fun (s,_) -> to_s s) |> String.concat ~sep:"\n\t")
     | (s, v) :: t ->
-        let inter, still_to_find, same_intersect, no_intersect =
-          Alleles.Set.inter_diff to_find s in
+        match to_find, s with
+        | _,            Universe    ->
+            (to_find, v) :: acc
+        | Universe,     Specific s2 ->
+            let still_to_find = Specific (Alleles.Set.complement s2) in
+            loop still_to_find ((s, v) :: acc) t
+        | Specific tf,  Specific s2 ->
+            let inter, still_to_find, same_intersect, no_intersect =
+                Alleles.Set.inter_diff tf s2 in
+            if same_intersect then                        (* Found everything *)
+              (to_find, v) :: acc
+            else if no_intersect then                       (* Found nothing. *)
+              loop to_find acc t
+            else                                          (* Found something. *)
+              let still_to_find = Specific still_to_find in
+              let inter         = Specific inter in
+              loop still_to_find ((inter, v) :: acc) t
 
+(*     let inter, still_to_find, same_intersect, no_intersect =
+          Alleles.Set.inter_diff to_find s in
         if same_intersect then begin                        (* Found everything *)
           (to_find, v) :: acc
         end else if no_intersect then begin       (* Found nothing. *)
           loop to_find acc t
         end else begin                                         (* Found something. *)
           loop still_to_find ((inter, v) :: acc) t
-        end
+        end *)
   in
   loop to_find [] slst
 
@@ -542,7 +576,9 @@ module ForwardGen (R : Ring) = struct
                     let ret = Alleles.Map.make zero in
                     Array.iter final ~f:(fun l ->
                       List.iter l ~f:(fun (allele_set, v) ->
-                        Alleles.Map.update_from allele_set ~f:((+) v) ret));
+                        match allele_set with
+                        | Universe     -> Alleles.Map.update ~f:((+) v) ret
+                        | Specific als -> Alleles.Map.update_from als ~f:((+) v) ret));
                     Alleles.Map.to_array ret
                   end
     ; combine   = begin fun ~into em ->
@@ -684,6 +720,10 @@ let construct input selectors =
       in
       let aaa = add_alternate_allele mp.reference ~position_map in
       List.iter ~f:(fun (allele, altseq) -> aaa allele altseq ems) nalt_elems;
+      let ems =
+        Array.map ems ~f:(fun l ->
+          List.map l ~f:(fun (p, a) -> p, wrap_as a))
+      in
       Ok { align_date = mp.align_date
          ; allele_index
          ; merge_map

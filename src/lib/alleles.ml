@@ -164,6 +164,8 @@ module Set = struct
   let is_set s allele =
     Fixed_width.get s (StringMap.find allele !_index.to_index)
 
+  let is_full = Fixed_width.is_full
+
   let fold ~f ~init s =
     let r = ref init in
     Fixed_width.iter_true s (fun i -> r := f !r !_index.to_allele.(i));
@@ -179,6 +181,7 @@ module Set = struct
   let equals = (=) (*?*)
 
   let union = Fixed_width.union
+  let union_all = Fixed_width.union_all
 
   let inter = Fixed_width.inter
 
@@ -281,6 +284,11 @@ module Map = struct
       with Not_found ->
         (i + 1, (v, Set.singleton a) ::asc))
     |> snd
+
+  let update ~f m =
+    for i = 0 to Array.length m - 1 do
+      m.(i) <- f m.(i)
+    done
 
   let update_from s ~f m =
     Fixed_width.iter_true s (fun i -> m.(i) <- f m.(i))

@@ -81,6 +81,15 @@ let is_empty bv =
   with Exit ->
     false
 
+let is_full bv =
+  try
+    for i = 0 to !last_array_index - 1 do
+      if bv.a.(i) <> all_ones_ then raise Exit
+    done;
+    bv.a.(!last_array_index) = !mask
+  with Exit ->
+    false
+
 (* Use the safe array access and throw an exception if out of bounds.
     This can be compiled away with -unsafe. *)
 let get bv i =
@@ -181,6 +190,19 @@ let union b1 b2 =
   let into = copy b1 in
   union_into ~into b2;
   into
+
+let union_all b1 b2 =
+  let into = copy b1 in
+  let all = ref true in
+  for i = 0 to !last_array_index - 1 do
+    let o = (Array.unsafe_get into.a i) lor (Array.unsafe_get b2.a i) in
+    Array.unsafe_set into.a i o;
+    all := !all && o = all_ones_
+  done;
+  let i = !last_array_index in
+  let o = (Array.unsafe_get into.a i) lor (Array.unsafe_get b2.a i) in
+  Array.unsafe_set into.a i o;
+  into, !all && o = !mask
 
 (* Underlying size shrinks for inter. *)
 let inter_into ~into bv =

@@ -44,6 +44,8 @@ module Set : sig
       [set] is mutated. *)
   val set : set -> allele -> set
 
+  val is_full : set -> bool
+
   (** [singleton allele] will create an edge set with just [allele]. *)
   val singleton : allele -> set
 
@@ -62,10 +64,10 @@ module Set : sig
   (** [cardinal set] returns the number of alleles found in [set]. *)
   val cardinal : set -> int
 
-
   (** [union e1 e2] will return an edge set with all alleles found in
       [e1] and/or [e2]. *)
   val union : set -> set -> set
+  val union_all : set -> set -> set * bool
 
   val unite : into:set -> set -> unit
 
@@ -159,6 +161,8 @@ module Map : sig
   (** [values_assoc m] compress (invert) the values found in [m] into
       an association list. *)
   val values_assoc : 'a map -> ('a * Set.set) list
+
+  val update : f:('a -> 'a) -> 'a map -> unit
 
   val update_from : Set.set -> f:('a -> 'a) -> 'a map -> unit
 
