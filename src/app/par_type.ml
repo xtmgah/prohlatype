@@ -27,7 +27,10 @@ let to_read_size_dependent
         in
         Ok (fun read_size ->
             let par_phmm_args = Cache.par_phmm_args ~input ~selectors ~read_size in
-            Cache.par_phmm ~skip_disk_cache par_phmm_args)
+            (*Cache.par_phmm ~skip_disk_cache par_phmm_args) *)
+            match Cache.par_phmm_no_cache par_phmm_args with
+            | Error e -> invalid_argf "Ugh: %s" e
+            | Ok pt   -> pt)
 
 exception PPE of string
 

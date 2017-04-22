@@ -348,7 +348,9 @@ module type Ring = sig
 
 end (* Ring *)
 
-type emissions = ((BaseState.t * int) * Alleles.Set.set) list
+type allele_set = Alleles.Set.set Hashcons.hash_consed
+
+type emissions = ((BaseState.t * int) * allele_set) list
 (* For every k there are 3 possible states. *)
 
 type 'a cell =
@@ -357,9 +359,33 @@ type 'a cell =
   ; delete  : 'a
   }
 
-type 'a entry = (Alleles.Set.set * 'a cell) list
-type 'a final_entry = (Alleles.Set.set * 'a) list
 
+type 'a entry = (allele_set * 'a cell) list
+type 'a final_entry = (allele_set * 'a) list
+
+type allele_set_pair = apair Hashcons.hash_consed
+and apair =
+  | Apair of allele_set * allele_set
+
+type idiff_result =
+  | Everything
+  | Nothing
+  | Something of allele_set * allele_set
+
+type cache =
+  { alleles         : Alleles.Set.set Hashcons.t
+  ; pairs           : apair Hashcons.t
+  ; mutable unions  : (apair, allele_set) Hmap.t 
+  ; mutable idiffs  : (apair, idiff_result) Hmap.t 
+  }
+
+let gen_cache () =
+  { alleles = Hashcons.create 7000    (* Value tailored for A *)
+  ; pairs   = Hashcons.create 5000    (* ? *)
+  ; unions  = Hmap.empty
+  ; idiffs  = Hmap.empty
+  }
+ 
 type workspace =
   { mutable forward             : float entry array array
   ; mutable final               : float final_entry array
@@ -373,25 +399,42 @@ let generate_workspace number_alleles bigK read_size =
   ; per_allele_emission = just_zeros number_alleles
   }
 
-type 'a fwd_recurrences =
-  { start     :  char -> float -> emissions -> 'a entry
-  ; first_row : 'a entry array array -> char -> float ->
-                  emissions -> i:int -> 'a entry
-  ; middle    : 'a entry array array -> char -> float ->
-                  emissions -> i:int -> k:int -> 'a entry
-  (* Doesn't use the delete section. *)
-  ; end_      : 'a entry array array -> int -> 'a final_entry
+let union_map cache a1 a2 =
+  let open Hashcons in
+  let p = hashcons cache.pairs (Apair (a1, a2)) in
+  try Hmap.find p cache.unions
+  with Not_found ->
+    let u = Alleles.Set.union a1.node a2.node in
+    let uh = hashcons cache.alleles u in
+    cache.unions <- Hmap.add p uh cache.unions;
+    uh
 
-  ; emission  : 'a final_entry array -> 'a array
-
-(* Combine emission results *)
-  ; combine   : into:'a array -> 'a array -> unit
-  }
+let idiff_map cache to_find a2 =
+  let open Hashcons in
+  let p = hashcons cache.pairs (Apair (to_find, a2)) in
+  try Hmap.find p cache.idiffs
+  with Not_found ->
+    let u =
+      let inter, still_to_find, same_intersect, no_intersect =
+        Alleles.Set.inter_diff to_find.node a2.node in
+      let uinter = hashcons cache.alleles inter in
+      let ustill = hashcons cache.alleles still_to_find in
+      if same_intersect then                              (* Found everything *)
+        Everything
+      else if no_intersect then                             (* Found nothing. *)
+        Nothing
+      else                                                (* Found something. *)
+        Something (ustill, uinter)
+    in
+    cache.idiffs <- Hmap.add p u cache.idiffs;
+    u
 
 (* Union, tail recursive. *)
-let mutate_or_add value allele_set lst =
+let mutate_or_add cache value allele_set lst =
   let rec loop acc = function
-    | (s, v) :: t when v = value -> acc @ (Alleles.Set.union s allele_set, v) :: t
+  (*| (s, v) :: t when v = value -> acc @ (Alleles.Set.union s allele_set, v) :: t *)
+    | (s, v) :: t when v = value -> let u = union_map cache allele_set s in
+                                    acc @ (u, v) :: t
     | h :: t                     -> loop (h :: acc) t
     | []                         -> (allele_set, value) :: acc
   in
@@ -415,25 +458,46 @@ let mutate_or_add value allele_set lst =
 
 let debug_set_assoc = ref false
 
-let set_assoc to_find slst =
+let set_assoc cache to_find slst =
   if !debug_set_assoc then printf "set_assoc %d\n" (List.length slst);
-  let to_s = Alleles.Set.to_string in
+  let to_s n = Alleles.Set.to_string n.Hashcons.node in
   let rec loop to_find acc = function
     | []          -> invalid_argf "Still missing! %s after looking in: %s"
-                      (to_s to_find) (List.map slst ~f:(fun (s,_) -> to_s s) |> String.concat ~sep:"\n\t")
+                      (to_s to_find)
+                      (List.map slst ~f:(fun (s,_) -> to_s s)
+                        |> String.concat ~sep:"\n\t")
     | (s, v) :: t ->
-        let inter, still_to_find, same_intersect, no_intersect =
+        match idiff_map cache to_find s with
+        | Everything               -> (to_find, v) :: acc
+        | Nothing                  -> loop to_find acc t
+        | Something (still, inter) -> loop still ((inter, v) :: acc) t
+(*      let inter, still_to_find, same_intersect, no_intersect =
           Alleles.Set.inter_diff to_find s in
-
-        if same_intersect then begin                        (* Found everything *)
+        if same_intersect then begin                      (* Found everything *)
           (to_find, v) :: acc
-        end else if no_intersect then begin       (* Found nothing. *)
+        end else if no_intersect then begin                 (* Found nothing. *)
           loop to_find acc t
-        end else begin                                         (* Found something. *)
+        end else begin                                    (* Found something. *)
           loop still_to_find ((inter, v) :: acc) t
-        end
+        end *)
   in
   loop to_find [] slst
+
+type 'a fwd_recurrences =
+  { start     : cache -> char -> float -> emissions -> 'a entry
+  ; first_row : cache -> 'a entry array array -> char -> float ->
+                  emissions -> i:int -> 'a entry
+  ; middle    : cache -> 'a entry array array -> char -> float ->
+                  emissions -> i:int -> k:int -> 'a entry
+  (* Doesn't use the delete section. *)
+  ; end_      : 'a entry array array -> int -> 'a final_entry
+
+  ; emission  : 'a final_entry array -> 'a array
+
+(* Combine emission results *)
+  ; combine   : into:'a array -> 'a array -> unit
+  }
+
 
 module ForwardGen (R : Ring) = struct
 
@@ -458,7 +522,6 @@ module ForwardGen (R : Ring) = struct
     Array.make len R.one
 
   let recurrences tm ~insert_prob read_size =
-
     let open R in                       (* Opening R shadows '+' and '*' below*)
     let t_s_m = constant (tm `StartOrEnd `Match) in
     let t_s_i = constant (tm `StartOrEnd `Insert) in
@@ -476,12 +539,11 @@ module ForwardGen (R : Ring) = struct
     let t_i_s = constant (tm `Insert `StartOrEnd) in
 
     let start_i = t_s_i * insert_prob in
-    { start   = begin fun base base_error emissions ->
+    { start   = begin fun cache base base_error emissions ->
                   List.fold_left emissions ~init:[]
                     ~f:(fun acc ((b, offset), allele_set) ->
                           let emp = to_match_prob base base_error b in
-                          mutate_or_add (offset, emp)
-                          allele_set acc)
+                          mutate_or_add cache (offset, emp) allele_set acc)
                   |> List.map ~f:(fun (allele_set, (_offset, emissionp)) ->
                         allele_set,
                         { match_ = emissionp * t_s_m
@@ -489,16 +551,17 @@ module ForwardGen (R : Ring) = struct
                         ; delete = zero
                         })
                 end
-    ; first_row = begin fun fm base base_error emissions ~i ->
+    ; first_row = begin fun cache fm base base_error emissions ~i ->
+                    let set_assoc = set_assoc cache in
                     List.fold_left emissions ~init:[]
                       ~f:(fun acc ((b, offset), allele_set) ->
                             let emp = to_match_prob base base_error b in
-                            mutate_or_add (offset, emp) allele_set acc)
+                            mutate_or_add cache (offset, emp) allele_set acc)
                     |> List.fold_left ~init:[] ~f:(fun acc (allele_set, (offset, emp)) ->
                         let inserts = set_assoc allele_set fm.(0).(i-1) in
                         (*printf "at k: %d i: %d offset:%d %d \n%!" 0 i offset j; *)
                           List.fold_left inserts ~init:acc ~f:(fun acc (als, c) ->
-                            mutate_or_add
+                            mutate_or_add cache
                               { match_ = emp * ( t_m_m * zero
                                               + t_i_m * zero
                                               + t_d_m * zero)
@@ -506,11 +569,12 @@ module ForwardGen (R : Ring) = struct
                               ; delete = t_m_d * zero + t_d_d * zero
                               } als acc))
                   end
-    ; middle  = begin fun fm base base_error emissions ~i ~k ->
+    ; middle  = begin fun cache fm base base_error emissions ~i ~k ->
+                  let set_assoc = set_assoc cache in
                   List.fold_left emissions ~init:[]
                     ~f:(fun acc ((b, offset), allele_set) ->
                           let emp = to_match_prob base base_error b in
-                          mutate_or_add (offset, emp) allele_set acc)
+                          mutate_or_add cache (offset, emp) allele_set acc)
                   |> List.fold_left ~init:[] ~f:(fun acc (allele_set, (offset, emp)) ->
                       let inserts = set_assoc allele_set fm.(k).(i-1) in
                       (*printf "at k: %d i: %d offset:%d %d \n%!" k i offset j; *)
@@ -523,7 +587,7 @@ module ForwardGen (R : Ring) = struct
                               ~f:(fun init (match_s, match_c) ->
                                   List.fold_left (set_assoc match_s deletes) ~init
                                     ~f:(fun acc (delete_s, delete_c) -> (* at delete_s intersects all 3!*)
-                                          mutate_or_add
+                                          mutate_or_add cache
                                             { match_ = emp * ( t_m_m * match_c.match_
                                                              + t_i_m * match_c.insert
                                                              + t_d_m * match_c.delete)
@@ -542,7 +606,7 @@ module ForwardGen (R : Ring) = struct
                     let ret = Alleles.Map.make zero in
                     Array.iter final ~f:(fun l ->
                       List.iter l ~f:(fun (allele_set, v) ->
-                        Alleles.Map.update_from allele_set ~f:((+) v) ret));
+                        Alleles.Map.update_from allele_set.Hashcons.node ~f:((+) v) ret));
                     Alleles.Map.to_array ret
                   end
     ; combine   = begin fun ~into em ->
@@ -663,6 +727,7 @@ type t =
   ; allele_index  : Alleles.index
   ; merge_map     : (string * string) list
   ; emissions_a   : emissions array
+  ; cache         : cache
   }
 
 let construct input selectors =
@@ -684,10 +749,16 @@ let construct input selectors =
       in
       let aaa = add_alternate_allele mp.reference ~position_map in
       List.iter ~f:(fun (allele, altseq) -> aaa allele altseq ems) nalt_elems;
+      let c = gen_cache () in
+      let ems = 
+        Array.map ems ~f:(fun l ->
+          List.map l ~f:(fun (p,a) -> (p, Hashcons.hashcons c.alleles a)))
+      in
       Ok { align_date = mp.align_date
          ; allele_index
          ; merge_map
          ; emissions_a = ems
+         ; cache       = c
          }
 
 let debug_ref = ref false
@@ -710,7 +781,7 @@ let generate_workspace_conf c read_size =
   let number_alleles = Alleles.length c.allele_index in
   generate_workspace number_alleles bigK read_size
 
-let forward_pass ?(logspace=true) ?ws { allele_index; emissions_a } read_size =
+let forward_pass ?(logspace=true) ?ws { allele_index; emissions_a; cache } read_size =
   let bigK = Array.length emissions_a in
   let number_alleles = Alleles.length allele_index in
   let tm = Phmm.TransitionMatrix.init ~ref_length:bigK read_size in
@@ -727,23 +798,23 @@ let forward_pass ?(logspace=true) ?ws { allele_index; emissions_a } read_size =
   fun ~into read read_prob ->
     (* special case the first row. *)
     ws.forward.(0).(0) <-
-      recurrences.start (String.get_exn read 0) read_prob.(0) emissions_a.(0);
+      recurrences.start cache (String.get_exn read 0) read_prob.(0) emissions_a.(0);
     for i = 1 to read_size - 1 do
       let base = String.get_exn read i in
       let base_prob = read_prob.(i) in
       ws.forward.(0).(i) <-
-        recurrences.first_row ws.forward base base_prob ~i emissions_a.(0)
+        recurrences.first_row cache ws.forward base base_prob ~i emissions_a.(0)
     done;
     (* All other rows. *)
     for k = 1 to bigK - 1 do
       let ek = emissions_a.(k) in
       ws.forward.(k).(0) <-
-        recurrences.start (String.get_exn read 0) read_prob.(0) ek;
+        recurrences.start cache (String.get_exn read 0) read_prob.(0) ek;
       for i = 1 to read_size - 1 do
         let base = String.get_exn read i in
         let base_prob = read_prob.(i) in
         ws.forward.(k).(i) <-
-          recurrences.middle ws.forward base base_prob ~i ~k ek
+          recurrences.middle cache ws.forward base base_prob ~i ~k ek
       done
     done;
     for k = 0 to bigK - 1 do
