@@ -986,12 +986,12 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
 
   let recurrences ?insert_p tm read_length number_alleles =
     let r = Fc.g ?insert_p tm read_length in
+    let eq = Fc.cells_close_enough in
 
    (* TODO: I could imagine some scenario's where it makes sense to cache,
        precompute or memoize this calculation. The # of base errors isn't
        that large (<100) and there are only 4 bases. So we could be performing
        the same lookup. *)
-    let eq = Fc.cells_close_enough in
     let to_em_set obsp emissions =
       Cm.map emissions ~f:(fun (b, offset) ->
         offset, Fc.to_match_prob obsp b)
@@ -1010,28 +1010,16 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
     let middle ws obsp emissions ~i ~k =
       let inserts = W.get ws ~i:(i-1) ~k in
       let ems = to_em_set obsp emissions in
-      Cm.concat_map2 ~eq inserts ~by:ems   (* ORDER matters for performance! *)
+      (* ORDER matters for performance! ems is constrained by reference vs base
+         possibilities, but inserts is determined by the number of cells. *)
+      Cm.concat_map2 ~eq inserts ~by:ems
           ~f:(fun inters insert_c (offset, emission_p) ->
                 let ks = Pervasives.(+) k offset in
                 let matches = W.get ws ~i:(i-1) ~k:ks in
                 let deletes = W.get ws ~i ~k:ks in
                 let insertsi = Cm.singleton inters insert_c in
                 (* inserti should come before other 2 for performance. *)
-                if !debug_ref then begin
-                  let si = Cm.to_list inserts |> List.map ~f:fst in
-                  let di = Cm.to_list deletes |> List.map ~f:fst in
-                  let mi = Cm.to_list matches |> List.map ~f:fst in
-                  let sl = List.length si in
-                  let dl = List.length di in
-                  let ml = List.length mi in
-                  let srt = List.sort ~cmp:compare in
-                  (*printf "at %d k:%d for %s\n" i k (Aset.to_human_readable inters); *)
-                  printf "at %d k:%d %d %d %d %b %b %b\n"
-                    i k sl dl ml
-                    (sl = dl && dl = ml) 
-                    (srt si = srt di)
-                    (srt di = srt mi) 
-                end;
+                if !debug_ref then printf "at %d k:%d \n" i k;
                 Cm.map3 ~eq:Fc.cells_close_enough insertsi deletes matches
                   ~f:(fun insert_c delete_c match_c ->
                         r.middle emission_p ~insert_c ~delete_c ~match_c))
