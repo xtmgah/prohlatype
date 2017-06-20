@@ -998,8 +998,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
     in
     let start obsp emissions =
       to_em_set obsp emissions
-      |> Cm.map ~bijective:true
-        ~f:(fun (_offset, emissionp) -> r.start emissionp)
+      |> Cm.map ~f:(fun (_offset, emissionp) -> r.start emissionp)
     in
     let fst_col ws obsp emissions ~i =
       to_em_set obsp emissions
@@ -1025,7 +1024,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
                         r.middle emission_p ~insert_c ~delete_c ~match_c))
     in
     let end_ ws k =
-      Cm.map ~bijective:true (W.get ws ~i:(read_length-1) ~k) ~f:r.end_
+      Cm.map (W.get ws ~i:(read_length-1) ~k) ~f:r.end_
     in
     let update_emission_from_cam em l =
       let open R in
@@ -1119,7 +1118,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
       Cm.concat_map inds ~f:(fun s (bv, ilst) ->
         let i = List.hd_exn ilst in
         Cm.get_exn s emissions.(i)
-        |> Cm.map ~bijective:true ~f:(fun (_bs, o) ->
+        |> Cm.map ~f:(fun (_bs, o) ->
             if o = min_int then
               (bv, ilst)
             else
@@ -1133,7 +1132,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
           Cm.singleton s (bv, ilst)
         else
           Cm.get_exn s increments.(i)
-          |> Cm.map ~bijective:true ~f:(fun o ->
+          |> Cm.map ~f:(fun o ->
             bv, o :: ilst))
 
     let n_times n f s =
@@ -1150,7 +1149,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
       n_times n (find_indices_below increments) inds
 
     let to_bands emissions_a increment_a c ~to_index inds =
-      let lnds = Cm.map inds ~bijective:true ~f:(fun st -> st, [to_index st]) in
+      let lnds = Cm.map inds ~f:(fun st -> st, [to_index st]) in
       let ai = find_indices_above_n c.width emissions_a lnds in
       let bi = find_indices_below_n c.width increment_a lnds in
       (* tl_exn -> drop the center band, so we don't duplicate it. *)
@@ -1170,7 +1169,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
       Cm.concat_map bands ~f:(fun s (bv, cols) ->
         let end_col = List.last cols |> Option.value_exn ~msg:"empty cols!" in
         Cm.get_exn s (W.get ws ~i:row ~k:end_col)
-        |> Cm.map ~bijective:true ~f:(fun lv -> (cols, bv, lv)))
+        |> Cm.map ~f:(fun lv -> (cols, bv, lv)))
 
     type t =
       { cols        : int list
@@ -1277,7 +1276,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
         Cm.get_exn alleles increment_a.(fs.best_col)
         (* Now fill in the width. *)
         |> to_bands emissions_a increment_a c ~to_index:(fun nr -> nr)
-        |> Cm.map ~bijective:true ~f:(fun (_br,cols) -> (cols, fs.best_c, fs.last_c)))
+        |> Cm.map ~f:(fun (_br,cols) -> (cols, fs.best_c, fs.last_c)))
       |> Cm.to_list
       |> List.map ~f:(fun (alleles, (cols, best_value, last_value)) ->
           { cols ; alleles ; best_value ; last_value })
@@ -1322,10 +1321,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
       | []                -> invalid_argf "empty cols"
       | start_row :: trows -> begin
           let nem_map, first_entry = update ?cur_row em_map start_row b.alleles in
-          let state =
-            Cm.map first_entry ~bijective:true
-              ~f:(init_fill_state start_row)
-          in
+          let state = Cm.map first_entry ~f:(init_fill_state start_row) in
           let update_fill_state prev nk cur =
             Cm.map2_partial prev ~by:cur
               ~f:(update_fill_state nk)
