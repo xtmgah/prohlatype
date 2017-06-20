@@ -18,8 +18,6 @@ module type M = sig
 
   type 'a t
 
-  val allele_set_to_string : set -> string
-
   val empty : 'a t
 
   val to_string_full : ('a -> string) -> 'a t -> string

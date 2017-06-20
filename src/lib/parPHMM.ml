@@ -1063,7 +1063,7 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
           ~missing:(fun missing_inserts ep_pair ->
               match prev_row with
               | None -> invalid_argf "At %d %d looking for inserts still missing %s"
-                          k i (Cm.allele_set_to_string missing_inserts)
+                          k i (Aset.to_human_readable missing_inserts)
               | Some v -> with_insert missing_inserts ep_pair v)
           ~f:with_insert
     in
