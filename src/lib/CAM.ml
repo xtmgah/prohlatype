@@ -292,7 +292,6 @@ module Make (AS : Alleles.Set) : M = struct
 
      Probably just need a better data structure. *)
   let concat_map2 ?eq l ~by ~f =
-    (*printf "%d %d\n" (List.length l) (List.length by); *)
     fold_new l ~f:(fun init (s, a) ->
       set_assoc_k s by ~init ~k:(fun intersect b init ->
         absorb ?eq (f intersect a b) ~init))
