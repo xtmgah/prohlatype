@@ -1017,8 +1017,21 @@ module ForwardMultipleGen (R : Ring)(Aset: Alleles.Set) = struct
                 let deletes = W.get ws ~i ~k:ks in
                 let insertsi = Cm.singleton inters insert_c in
                 (* inserti should come before other 2 for performance. *)
-                if !debug_ref then
-                  printf "at %d k:%d for %s\n" i k (Aset.to_human_readable inters);
+                if !debug_ref then begin
+                  let si = Cm.to_list inserts |> List.map ~f:fst in
+                  let di = Cm.to_list deletes |> List.map ~f:fst in
+                  let mi = Cm.to_list matches |> List.map ~f:fst in
+                  let sl = List.length si in
+                  let dl = List.length di in
+                  let ml = List.length mi in
+                  let srt = List.sort ~cmp:compare in
+                  (*printf "at %d k:%d for %s\n" i k (Aset.to_human_readable inters); *)
+                  printf "at %d k:%d %d %d %d %b %b %b\n"
+                    i k sl dl ml
+                    (sl = dl && dl = ml) 
+                    (srt si = srt di)
+                    (srt di = srt mi) 
+                end;
                 Cm.map3 ~eq:Fc.cells_close_enough insertsi deletes matches
                   ~f:(fun insert_c delete_c match_c ->
                         r.middle emission_p ~insert_c ~delete_c ~match_c))

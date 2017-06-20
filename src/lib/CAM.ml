@@ -14,11 +14,9 @@ open Util
 
 type set = Alleles.set
 
-type 'a t = (set * 'a) list
-
 module type M = sig
 
-  (*type 'a t *)
+  type 'a t
 
   val allele_set_to_string : set -> string
 
@@ -114,18 +112,32 @@ end (* M *)
 
 module Make (AS : Alleles.Set) : M = struct
 
-  let empty = []
+  type 'a mlist =
+    | Nil
+    | Cons of 'a cell
+  and 'a cell =
+    { mutable hd : 'a
+    ; mutable tl : 'a mlist
+    }
+
+  type 'a t = (set * 'a) mlist
+
+  let empty = Nil
 
   let allele_set_to_string s = AS.to_human_readable s
 
+  let rec to_list = function
+    | Nil    -> []
+    | Cons c -> c.hd :: (to_list c.tl)
+
   let to_string t =
     String.concat ~sep:"\n\t"
-      (List.map t ~f:(fun (s,_v) ->
+      (List.map (to_list t) ~f:(fun (s,_v) ->
         sprintf "%s" (allele_set_to_string s)))
 
   let to_string_full v_to_s t =
     String.concat ~sep:"\n\t"
-      (List.map t ~f:(fun (s,v) ->
+      (List.map (to_list t) ~f:(fun (s,v) ->
         sprintf "%s:%s" (allele_set_to_string s) (v_to_s v)))
 
   (* let mutate_or_add assoc new_allele_set value =
@@ -145,52 +157,95 @@ module Make (AS : Alleles.Set) : M = struct
       (AS.copy new_allele_set, value) :: assoc *)
 
   (* Union, tail recursive. *)
+  (*
   let mutate_or_add ?eq lst ((alleles, value) as p) =
     let eq = Option.value eq ~default:(=) in
     let rec loop acc = function
-      | (s, v) :: t when eq v value -> acc @ (AS.union s alleles, v) :: t
+      | (s, v) :: t when eq v value -> (printf "1\n"); acc @ (AS.union s alleles, v) :: t
       | h :: t                      -> loop (h :: acc) t
-      | []                          -> p :: acc
+      | []                          -> (printf "2\n"); p :: acc
     in
     loop [] lst
+    *)
+
+  let cons hd tl =
+    Cons { hd; tl}
+
+  let mutate_or_add ?eq lst ((alleles, value) as p) =
+    let eq = Option.value eq ~default:(=) in
+    let rec loop ({ hd = (s, v); tl } as c) =
+      if eq v value then
+        c.hd <- AS.union s alleles, v
+      else match tl with
+           | Nil     -> c.tl <- Cons { hd = p; tl = Nil}
+           | Cons cc -> loop cc
+    in
+    match lst with
+    | Nil     -> cons p lst
+    | Cons c  -> loop c; lst
 
   let add ?eq alleles v l = mutate_or_add ?eq l (alleles,v)
 
-  let join ?eq l1 l2 = List.fold_left l1 ~init:l2 ~f:(mutate_or_add ?eq)
+  let singleton s a = cons (s,a) Nil
 
-  let of_list ?eq l = List.fold_left l ~init:[] ~f:(mutate_or_add ?eq)
+  let of_list ?eq l = List.fold_left l ~init:Nil ~f:(mutate_or_add ?eq)
 
-  let singleton s a = [s,a]
+  (*let to_list l = l *)
 
-  let to_list l = l
+  let fold_left ~init ~f lst =
+    let rec loop acc = function
+      | Nil             -> acc
+      | Cons { hd; tl } -> loop (f acc hd) tl
+    in
+    loop init lst
+
+  let join ?eq l1 l2 = fold_left l1 ~init:l2 ~f:(mutate_or_add ?eq)
+
+  let map ~f lst =
+    fold_left ~init:Nil ~f:(fun acc v -> cons (f v) acc)
+
+  let map_snd ~f =
+    fold_left ~init:Nil ~f:(fun acc (s, v) -> cons (s, f v) acc)
 
   let domain = function
-    | []             -> AS.init ()
-    | (init, _) :: t -> List.fold_left t ~init ~f:(fun u (s, _) -> AS.union u s)
+    | Nil     -> AS.init ()
+    | Cons { hd = (init, _) ; tl } ->
+                  fold_left ~init ~f:(fun u (s, _) -> AS.union u s) tl
 
-  let length = List.length
+  let length l = fold_left ~init:0 ~f:(fun s _ -> s + 1) l
 
   exception StillMissing of string
 
   let still_missingf fmt =
     ksprintf (fun s -> raise (StillMissing s)) fmt
 
-  let set_assoc_exn to_find t =
+  let set_assoc_k ?n ?missing to_find lst ~k ~init =
     let rec loop to_find acc = function
-      | []          -> still_missingf "%s after looking in: %s"
-                        (allele_set_to_string to_find) (to_string t)
-      | (s, v) :: t ->
+      | Nil         -> begin match missing with
+                       | None -> still_missingf "%s%s after looking in: %s"
+                                  (Option.value ~default:"" n)
+                                  (allele_set_to_string to_find) (to_string lst)
+                       | Some m -> m to_find acc
+                       end
+      | Cons { hd = (s,v) ; tl } ->
           let inter, still_to_find, same_intersect, no_intersect =
-            AS.inter_diff to_find s in
+            AS.inter_diff to_find s
+          in
           if same_intersect then begin                      (* Found everything *)
-            (to_find, v) :: acc
+            k to_find v acc
           end else if no_intersect then begin                 (* Found nothing. *)
-            loop to_find acc t
+            loop to_find acc tl
           end else begin                                    (* Found something. *)
-            loop still_to_find ((inter, v) :: acc) t
+            let nacc = k inter v acc in
+            loop still_to_find nacc tl
           end
     in
-    loop to_find [] t
+    loop to_find init lst
+
+  let set_assoc_exn to_find lst =
+    set_assoc_k to_find lst
+      ~init:Nil
+      ~k:(fun to_find v acc -> cons (to_find, v) acc)
 
   let set_assoc to_find t =
     try Some (set_assoc_exn to_find t)
@@ -202,71 +257,32 @@ module Make (AS : Alleles.Set) : M = struct
 
   let get_value s t =
     Option.bind (get s t) ~f:(function
-      | [_,v] -> Some v
-      | _     -> None)
+      | Cons { hd = (_,v) ; _} -> Some v
+      | _                      -> None)
 
-  let iter l ~f = List.iter l ~f:(fun (a, s) -> f a s)
+  let iter l ~f = fold_left ~init:() ~f:(fun () (s, v) -> f s v) l
 
   let iter_values l ~f =
-    List.iter l ~f:(fun (a, v) ->
+    iter l ~f:(fun a v ->
       AS.iter_set_indices a ~f:(fun i -> f i v))
 
-  let fold l ~init ~f = List.fold_left l ~init ~f:(fun b (a, s) -> f b a s)
-
-  let set_assoc_with_mg to_find slst ~missing ~g ~init =
-    let rec loop to_find acc = function
-      | []          -> add to_find (missing to_find) acc
-      | (s, v) :: t ->
-          let inter, still_to_find, same_intersect, no_intersect =
-            AS.inter_diff to_find s
-          in
-          if same_intersect then begin                      (* Found everything *)
-            add to_find (g v) acc
-          end else if no_intersect then begin                 (* Found nothing. *)
-            loop to_find acc t
-          end else begin                                    (* Found something. *)
-            let nacc = add inter (g v) acc in
-            loop still_to_find nacc t
-          end
-    in
-    loop to_find init slst
+  let fold l ~init ~f = fold_left l ~init ~f:(fun b (a, s) -> f b a s)
 
   let map ?bijective l ~f =
     match bijective with
     | Some true         ->                                            (* O(n) *)
-      List.map_snd ~f:(fun v -> f v) l
+        map_snd ~f l
     | Some false | None ->                                          (* O(n^2) *)
-      List.fold_left l ~init:[] ~f:(fun acc (s, v) -> add s (f v) acc)
+        fold_left l ~init:Nil ~f:(fun acc (s, v) -> add s (f v) acc)
 
-  let set_assoc_k ?n ?missing to_find t ~k ~init =
-    let rec loop to_find acc = function
-      | []          -> begin match missing with
-                       | None -> still_missingf "%s%s after looking in: %s"
-                                  (Option.value ~default:"" n)
-                                  (allele_set_to_string to_find) (to_string t)
-                       | Some m -> m to_find acc
-                       end
-      | (s, v) :: t ->
-          let inter, still_to_find, same_intersect, no_intersect =
-            AS.inter_diff to_find s
-          in
-          if same_intersect then begin                      (* Found everything *)
-            k to_find v acc
-          end else if no_intersect then begin                 (* Found nothing. *)
-            loop to_find acc t
-          end else begin                                    (* Found something. *)
-            let nacc = k inter v acc in
-            loop still_to_find nacc t
-          end
-    in
-    loop to_find init t
+  let absorb_k t ~init ~f = fold_left t ~init ~f
 
-  let absorb_k t ~init ~f = List.fold_left t ~init ~f
+  let absorb ?eq t ~init = fold_left t ~init ~f:(mutate_or_add ?eq)
 
-  let absorb ?eq t ~init = absorb_k t ~init ~f:(mutate_or_add ?eq)
+  let fold_new ~f l = fold_left ~init:Nil ~f l
 
   let concat_map ?eq l ~f =
-    List.fold_left l ~init:[] ~f:(fun init (s, a) -> absorb ?eq (f s a) ~init)
+    fold_new l ~f:(fun init (s, a) -> absorb ?eq (f s a) ~init)
 
   (* The order of set arguments matters for performance. Better to fold over
      the longer list and lookup (set_assoc_k) into the shorter one. Remember
@@ -277,57 +293,57 @@ module Make (AS : Alleles.Set) : M = struct
      Probably just need a better data structure. *)
   let concat_map2 ?eq l ~by ~f =
     (*printf "%d %d\n" (List.length l) (List.length by); *)
-    List.fold_left l ~init:[] ~f:(fun init (s, a) ->
+    fold_new l ~f:(fun init (s, a) ->
       set_assoc_k s by ~init ~k:(fun intersect b init ->
         absorb ?eq (f intersect a b) ~init))
 
   let concat_map2_partial ?eq l ~by ~f ~missing =
-    List.fold_left l ~init:[] ~f:(fun init (s, a) ->
+    fold_new l ~f:(fun init (s, a) ->
       set_assoc_k s by ~init
         ~k:(fun intersect b init -> absorb ?eq (f intersect a b) ~init)
         ~missing:(fun sm init -> absorb ?eq ~init (missing sm a)))
 
   let map2 ?eq l1 l2 ~f =
-    List.fold_left l1 ~init:[] ~f:(fun init (s, a) ->
+    fold_new l1 ~f:(fun init (s, a) ->
       set_assoc_k s l2 ~init ~k:(fun intersect b acc ->
         mutate_or_add ?eq acc (intersect, f a b)))
 
   let map3 ?eq l1 l2 l3 ~f =
-    List.fold_left l1 ~init:[] ~f:(fun init (is1, a) ->
+    fold_new l1 ~f:(fun init (is1, a) ->
       set_assoc_k ~n:"1" is1 l2 ~init ~k:(fun is2 b init ->
         set_assoc_k ~n:"2" is2 l3 ~init ~k:(fun intersect c acc ->
           mutate_or_add ?eq acc (intersect, f a b c))))
 
   let map2_partial ?eq l ~by ~missing ~f =
-    List.fold_left l ~init:[] ~f:(fun init (s, a) ->
+    fold_new l ~f:(fun init (s, a) ->
       set_assoc_k s by ~init
         ~k:(fun intercept b acc -> mutate_or_add ?eq acc (intercept, f a b))
         ~missing:(fun sm init -> absorb ?eq ~init (missing sm a)))
 
   let map3_partial ?eq l ~by1 ~missing1 ~by2 ~missing2 ~f =
-    List.fold_left l ~init:[] ~f:(fun init (is1, a) ->
+    fold_new l ~f:(fun init (is1, a) ->
       let k is2 b init =
         let k2 intercept c acc = mutate_or_add ?eq acc (intercept, f a b c) in
         set_assoc_k is2 by2 ~init ~k:k2
           ~missing:(fun sm init ->
-            absorb_k (missing2 sm a b) ~init ~f:(fun init (s, b) -> k2 s b init))
+            fold_left (missing2 sm a b) ~init ~f:(fun init (s, b) -> k2 s b init))
       in
       set_assoc_k is1 by1 ~init ~k
         ~missing:(fun sm init ->
-          absorb_k (missing1 sm a) ~init ~f:(fun init (s, b) -> k s b init)))
+          fold_left (missing1 sm a) ~init ~f:(fun init (s, b) -> k s b init)))
 
   let init_everything v =
     let nothing = AS.init () in
-    [AS.complement nothing, v]
+    singleton (AS.complement nothing) v
 
   let partition_map l ~f =
     let rec loop bs cs = function
-      | []          -> bs, cs
-      | (s, a) :: t ->
+      | Nil                     -> bs, cs
+      | Cons {hd = (s, a); tl } ->
           match f s a with
-          | `Fst b -> loop ((s, b) :: bs) cs t
-          | `Snd c -> loop bs ((s, c) :: cs) t
+          | `Fst b -> loop (cons (s, b) bs) cs tl
+          | `Snd c -> loop bs (cons (s, c) cs) tl
     in
-    loop [] [] l
+    loop Nil Nil l
 
 end (* Make *)
