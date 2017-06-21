@@ -138,6 +138,8 @@ end
 
 module type Set = sig
 
+  val index : index
+
   val copy : set -> set
 
   val init : unit -> set
@@ -218,6 +220,8 @@ module type Set = sig
 end (* Set *)
 
 module MakeSet (I: Index) : Set = struct
+
+  let index = I.index
 
   module Fw = Fixed_width.Make(struct let size = I.index.size end)
 
