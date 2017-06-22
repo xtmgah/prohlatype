@@ -38,9 +38,12 @@ module type M = sig
 
   val get : set -> 'a t -> 'a t option
 
+  (* TODO: Remove/Refactor this method. It is used for the case where set is
+           just one allelle, but it doesn't make sense to return _one_ value
+           from this map. *)
   val get_value : set -> 'a t -> 'a option
 
-  exception StillMissing of string
+  exception Missing of string
 
   val get_exn : set -> 'a t -> 'a t
 
@@ -106,103 +109,138 @@ module type M = sig
      'b t * 'c t
 
 end (* M *)
-(*
+
 module Interval : (sig
 
-  type t
+  type t = int * int
 
   val make : int -> int -> t
-  val inter_diff : t -> t -> t option * t list * t list
+
+  val to_string : t -> string
+
+  type inter_diff_res =
+    | Before                  (* First interval comes completely before Second interval. *)
+    | After                   (* First interval comes completely after Second interval. *)
+    | Inter of inter          (* Intersection *)
+  and rest =
+    | B of t      (* Before the intersection. *)
+    | A of t      (* After the intersection. *)
+    | S of t * t  (* Split both before and after intersection. *)
+    | E           (* Empty *)
+  and inter =
+    { i : t
+    ; fst : rest
+    ; snd : rest
+    }
+
+  (*val inter_diff : t -> t -> (t * t list * t list) option *)
+  val inter_diff : t -> t -> inter_diff_res
 
   val extend : t -> int -> t option
   val merge : t -> t -> t option
 
-end)= struct
+end) = struct
+
+  type t = int * int
+
+  type inter_diff_res =
+    | Before
+    | After
+    | Inter of inter
+  and rest =
+    | B of t
+    | A of t
+    | S of t * t
+    | E
+  and inter =
+    { i : t
+    ; fst : rest
+    ; snd : rest
+    }
 
   let make s1 e1 =
     if e1 < s1 then invalid_argf "Not in order %d < %d" e1 s1 else (e1, s1)
 
-  let inter_diff (t1  t2 =
+  let to_string (s, e) =
+    sprintf "(%d,%d)" s e
+
+  let inter_diff t1  t2 =
     let s1, e1 = t1 in
     let s2, e2 = t2 in
     if s1 = e1 then begin
-      if s1 > s2 then begin                     (* S2_1 *)
+    (* Handle the cases where the first interval is 1 wide to eliminate some
+       corner cases. *)
 
-        if e2 < s1 then                           (* E2_1 *)
-          None,     [t1],               [t2]
-        else if e2 = s1 then                      (* E2_2 *)
-          Some t1,  [],                 [s2, e2 - 1]
-        else begin (* e2 > s1 *)                        (* E2_3 *)
-          Some t1,  [],                 [s2, s1 - 1; s1 + 1, e2]
+      if s1 > s2 then begin                                           (* S2_1 *)
+        if e2 < s1 then                                               (* E2_1 *)
+          After
+        else if e2 = s1 then                                          (* E2_2 *)
+          Inter { i = t1; fst = E;  snd = B (s2, s1 - 1)                }
+        else begin (* e2 > s1 *)                                      (* E2_3 *)
+          Inter { i = t1; fst = E;  snd = S ((s2, s1 - 1), (e1 + 1, e2))}
         end
 
-      end else if s1 = s2 then begin            (* S2_2 *)
-
-        if e2 < s1 then                           (* E2_1 *)
+      end else if s1 = s2 then begin                                  (* S2_2 *)
+        if e2 < s1 then                                               (* E2_1 *)
           invalid_argf  "broken invariant (%d,%d) (%d, %d)" s1 e1 s2 e2
-        else if e2 = s1 then                      (* E2_2 *)
-          Some t1,  [],                 []
-        else begin (* e2 > s1 *)                        (* E2_3 *)
-          Some t1,  [],                 [s1 + 1, e2]
+        else if e2 = s1 then                                          (* E2_2 *)
+          Inter { i = t1; fst = E;  snd = E }
+        else begin (* e2 > s1 *)                                      (* E2_3 *)
+          Inter { i = t1; fst = E;  snd = A (e1 + 1, e2) }
         end
 
-      end else (*if s1 < s2 then *) begin            (* S2_3 *)
-
-        if e2 <= s1 then                          (* E2_1, E2_2 *)
+      end else (*if s1 < s2 then *) begin                             (* S2_3 *)
+        if e2 <= s1 then                                        (* E2_1, E2_2 *)
           invalid_argf  "broken invariant (%d,%d) (%d, %d)" s1 e1 s2 e2
-        else begin (* e2 > s1 *)                        (* E2_3 *)
-          None,           [t1],         [t2]
+        else begin (* e2 > s1 *)                                      (* E2_3 *)
+          Before
         end
       end
 
     end else begin (* s1 < e1 *)
-      if s1 > s2 then                           (* S2_1 *)
-        if e2 < s1 then                           (* E2_1 *)
-          None,           [t1],         [t2]
-        else if e2 = s1 then                      (* E2_2 *)
-          Some (e2, s1),  [s1 + 1, e1], [s2, s1 - 1]
-        else if (*e2 > s1 && *) e2 < e1 then      (* E2_3 *)
-          Some (s1, e2),  [e2 + 1, e1], [s2, s1 - 1]
-        else if e2 = e1 then                      (* E2_4 *)
-          Some t1,        [],           [s2, s1 - 1]
-        else (* e2 > e1 *)                        (* E2_5 *)
-          Some t1,        [],           [s2, s1 - 1; e1 + 1, e2]
+      if s1 > s2 then                                                 (* S2_1 *)
+        if e2 < s1 then                                               (* E2_1 *)
+          After
+        else if (*e2 >= s1 && *) e2 < e1 then                   (* E2_2, E2_3 *)
+          Inter { i = (s1, e2); fst = A (e2 + 1, e1); snd = B (s2, s1 - 1) }
+        else if e2 = e1 then                                          (* E2_4 *)
+          Inter { i = t1;       fst = E;              snd = B (s2, s1 - 1) }
+        else (* e2 > e1 *)                                            (* E2_5 *)
+          Inter { i = t1;       fst = E;              snd = S ((s2, s1 - 1), (e1 + 1, e2)) }
 
-      else if s1 = s2 then                      (* S2_2 *)
-        if e2 < s1 then                           (* E2_1 *)
+      else if s1 = s2 then                                            (* S2_2 *)
+        if e2 < s1 then                                               (* E2_1 *)
           invalid_argf  "broken invariant (%d,%d) (%d, %d)" s1 e1 s2 e2
-        else if e2 = s1 then                      (* E2_2 *)
-          Some t2,        [s1 + 1, e1], []
-        else if (*e2 > s1 && *) e2 < e1 then      (* E2_3 *)
-          Some (s1, e2),  [e2 + 1, e1], []
-        else if e2 = e1 then                      (* E2_4 *)
-          Some t1,        [],           []        (* Perfect alignment! *)
-        else (* e2 > e1 *)                        (* E2_5 *)
-          Some t1,        [],           [e1 + 1, e2]
+        else if (*e2 >= s1 && *) e2 < e1 then                   (* E2_2, E2_3 *)
+          Inter { i = (s1, e2); fst = A (e2 + 1, e1); snd = E }
+        else if e2 = e1 then                                          (* E2_4 *)
+          Inter { i = t1;       fst = E;              snd = E }
+        else (* e2 > e1 *)                                            (* E2_5 *)
+          Inter { i = t1;       fst = E;              snd = A (e1 + 1, e2) }
 
-      else if s1 < s2 && s2 < e1 then           (* S2_3 *)
-        if e2 <= s1 then                           (* E2_1, E2_2 *)
+      else if s1 < s2 && s2 < e1 then                                 (* S2_3 *)
+        if e2 <= s1 then                                        (* E2_1, E2_2 *)
           invalid_argf  "broken invariant (%d,%d) (%d, %d)" s1 e1 s2 e2
-        else if (*e2 > s1 && *) e2 < e1 then      (* E2_3 *)
-          Some t2,        [s1, s2 - 1; e2 + 1, e1], []
-        else if e2 = e1 then                      (* E2_4 *)
-          Some t2,        [s1, s2 - 1],             []
-        else (* e2 > e1 *)                        (* E2_5 *)
-          Some (s2,e1),   [s1, s2 - 1],             [e1+1, e2]
+        else if (*e2 > s1 && *) e2 < e1 then                          (* E2_3 *)
+          Inter { i = t2;       fst = S ((s1, s2-1), (e2+1, e1)); snd = E }
+        else if e2 = e1 then                                          (* E2_4 *)
+          Inter { i = t2;       fst = B (s1, s2-1);               snd = E }
+        else (* e2 > e1 *)                                            (* E2_5 *)
+          Inter { i = (s2, e1); fst = B (s1, s2-1);               snd = A (e1 + 1, e2) }
 
-      else if e1 = s2 then                      (* S2_4 *)
-        if e2 < e1 then                           (* E2_1, E2_2, E2_3 *)
+      else if e1 = s2 then                                            (* S2_4 *)
+        if e2 < e1 then                                   (* E2_1, E2_2, E2_3 *)
           invalid_argf  "broken invariant (%d,%d) (%d, %d)" s1 e1 s2 e2
-        else if e2 = e1 then                      (* E2_4 *)
-          Some t2,        [s1, s2 - 1],             []
-        else (* e2 > e1 *)                        (* E2_5 *)
-          Some (s2,e1),   [s1, s2 - 1],             [e1+1, e2]
+        else if e2 = e1 then                                          (* E2_4 *)
+          Inter { i = t2;       fst = B (s1, s2 - 1); snd = E }
+        else (* e2 > e1 *)                                            (* E2_5 *)
+          Inter { i = (s2, e1); fst = B (s1, s2 - 1); snd = A (e1 + 1, e2)  }
 
-      else (*if e1 < s2 then *)                 (* S2_5 *)
-        if e2 <= e1 then                           (* E2_1, E2_2, E2_3, E2_4 *)
+      else (*if e1 < s2 then *)                                       (* S2_5 *)
+        if e2 <= e1 then                            (* E2_1, E2_2, E2_3, E2_4 *)
           invalid_argf  "broken invariant (%d,%d) (%d, %d)" s1 e1 s2 e2
-        else (* e2 > e1 *)                        (* E2_5 *)
-          None,           [t1],                     [t2]
+        else (* e2 > e1 *)                                            (* E2_5 *)
+          Before
     end
 
   let extend (s, e) n =
@@ -222,53 +260,98 @@ end)= struct
       None
 
 end (* Interval *)
-*)
 
 module Make (Aset : Alleles.Set) : M = struct
 
-  (*
-  let intervals_of_allele_set =
-    Aset.fold_set_indices ~init:(`Start []) ~f:(fun a i ->
+  let intervals_of_allele_set set =
+    Aset.fold_set_indices set ~init:None ~f:(fun a i ->
       match a with
-      | `Start l -> `State (Interval.make i i, l)
-      | `State (interval, l) ->
+      | None                -> Some (Interval.make i i, [])
+      | Some (interval, l)  ->
           match Interval.extend interval i with
-          | None    -> `State (Interval.make i i, interval :: l)
-          | Some ni -> `State (ni, l))
+          | None    -> Some (Interval.make i i, interval :: l)
+          | Some ni -> Some (ni, l))
     |> function
-       | `Start l       -> l                (* Only if empty *)
-       | `State (i, l)  -> List.rev (i :: l)
-       *)
+        | None        -> []                (* Only if empty *)
+        | Some (i, l) -> List.rev (i :: l)
 
+  let interval_to_allele_set (st, en) =
+    let i = Aset.index in
+    let rec loop j s =
+      if j > en then s else loop (j + 1) (Aset.set s i.Alleles.to_allele.(j))
+    in
+    loop st (Aset.init ())
 
-  type 'a mlist =
-    | Nil
-    | Cons of 'a cell
+  type 'a mlist = 'a cell option
   and 'a cell =
-    { value       : 'a
-    ; mutable set : set
-    ; mutable tl  : 'a mlist
+    { value         : 'a
+    ; set           : Interval.t
+    ; mutable prev  : 'a cell
+    ; mutable next  : 'a cell
     }
 
   type 'a t = 'a mlist
 
-  let empty = Nil
+  let empty = None
 
   let allele_set_to_string s = Aset.to_human_readable s
 
-  let rec to_list = function
-    | Nil    -> []
-    | Cons c -> (c.set, c.value) :: (to_list c.tl)
+  let interval_set_to_string i =
+    allele_set_to_string (interval_to_allele_set i)
+
+  let rec forward_loop endc f cell acc =
+    let nacc = f acc cell.set cell.value in
+    if cell.next != endc then
+      forward_loop endc f cell.next nacc
+    else
+      nacc
+
+  let rec backward_loop endc f cell acc =
+    let nacc = f cell.set cell.value acc in
+    if cell.prev != endc then
+      backward_loop endc f cell.prev nacc
+    else
+      nacc
+
+  let fold_left ~init ~f = function
+    | None      -> init
+    | Some cell -> forward_loop cell f cell init
+
+  let fold_right lst ~init ~f =
+    match lst with
+    | None      -> init
+    | Some cell -> backward_loop cell f cell init
+
+  let sc set value =
+    let rec c = { value; set; prev = c; next = c} in
+    c
+
+  let map ~f = function
+    | None      -> empty
+    | Some cell ->
+        let first = sc cell.set (f cell.value) in
+        let newf prev set value =
+          let nc = sc set (f value) in
+          nc.prev <- prev;
+          prev.next <- nc;
+          nc
+        in
+        let last = forward_loop cell newf cell first in
+        first.prev <- last;
+        last.next <- first;
+        Some first
+
+  let to_list lst = fold_right ~init:[] ~f:(fun s v l -> (s,v) :: l) lst
 
   let to_string t =
     String.concat ~sep:"\n\t"
       (List.map (to_list t) ~f:(fun (s,_v) ->
-        sprintf "%s" (allele_set_to_string s)))
+        sprintf "%s" (interval_set_to_string s)))
 
   let to_string_full v_to_s t =
     String.concat ~sep:"\n\t"
       (List.map (to_list t) ~f:(fun (s,v) ->
-        sprintf "%s:%s" (allele_set_to_string s) (v_to_s v)))
+        sprintf "%s:%s" (interval_set_to_string s) (v_to_s v)))
 
   (* Union, tail recursive. *)
   (*
@@ -282,10 +365,28 @@ module Make (Aset : Alleles.Set) : M = struct
     loop [] lst
     *)
 
-  let cons set value tl =
-    Cons { value; set; tl}
+  let insert nc c =
+    let last = c.prev in
+    nc.prev <- last;
+    last.next <- nc;
+    nc.next <- c;
+    c.prev <- nc
 
-  let mutate_or_add ?eq lst alleles value =
+  (* Add to end *)
+  let append set value l = match l with
+    | None   -> Some (sc set value)
+    | Some c -> let nc = sc set value in
+                insert nc c;
+                l
+
+  (* Add to beginning, since circular the difference is only what is returned. *)
+  let prepend set value = function
+    | None   -> Some (sc set value)
+    | Some c -> let nc = sc set value in
+                insert nc c;
+                Some nc
+
+(* let mutate_or_add ?eq lst alleles value =
     let eq = Option.value eq ~default:(=) in
     let rec loop c =
       if eq c.value value then
@@ -296,88 +397,111 @@ module Make (Aset : Alleles.Set) : M = struct
     in
     match lst with
     | Nil     -> cons alleles value lst
-    | Cons c  -> loop c; lst
+    | Cons c  -> loop c; lst *)
 
-  let add ?eq alleles value l = mutate_or_add ?eq l alleles value
 
-  let singleton set value = cons set value Nil
+  let add ?eq alleles value l = append alleles value l
+
+  let singleton set value = Some (sc set value)
 
   let of_list ?eq l =
-    List.fold_left l ~init:Nil
-      ~f:(fun acc (set, value) -> mutate_or_add ?eq acc set value)
+    List.fold_left l ~init:empty
+      ~f:(fun acc (set, value) -> append set value acc)
+
+  let of_allele_set s v =
+    of_list (List.map ~f:(fun i -> (i, v)) (intervals_of_allele_set s))
 
   (*let to_list l = l *)
 
-  let fold_left lst ~init ~f =
-    let rec loop acc = function
-      | Nil                     -> acc
-      | Cons { value; set; tl } -> loop (f acc set value) tl
-    in
-    loop init lst
-
-  let join ?eq l1 l2 = fold_left l1 ~init:l2 ~f:(mutate_or_add ?eq)
-
-  let map lst ~f =
-    let rec loop = function
-      | Nil     -> Nil
-      | Cons c  -> Cons { value = f c.value
-                        ; set = c.set
-                        ; tl = loop c.tl
-                        }
-    in
-    loop lst
+  let join ?eq l1 l2 =
+    fold_left l1 ~init:l2 ~f:(fun l set value -> append set value l)
 
   (*let domain = function
     | Nil     -> Aset.init ()
     | Cons { hd = (init, _) ; tl } ->
                   fold_left ~init ~f:(fun u s _ -> Aset.union u s) tl*)
 
-  let length l = fold_left ~init:0 ~f:(fun s _ _ -> s + 1) l
+  let length l =
+    fold_left ~init:0 ~f:(fun s _ _ -> s + 1) l
 
-  exception StillMissing of string
+  exception Missing of string
 
-  let still_missingf fmt =
-    ksprintf (fun s -> raise (StillMissing s)) fmt
+  let missingf fmt =
+    ksprintf (fun s -> raise (Missing s)) fmt
 
-  let set_assoc_k ?n ?missing to_find lst ~k ~init =
-    let rec loop to_find acc = function
-      | Nil         -> begin match missing with
-                       | None -> still_missingf "%s%s after looking in: %s"
-                                  (Option.value ~default:"" n)
-                                  (allele_set_to_string to_find) (to_string lst)
-                       | Some m -> m to_find acc
-                       end
-      | Cons { set; value ; tl } ->
-          let inter, still_to_find, same_intersect, no_intersect =
-            Aset.inter_diff to_find set
-          in
-          if same_intersect then begin                      (* Found everything *)
-            k to_find value acc
-          end else if no_intersect then begin                 (* Found nothing. *)
-            loop to_find acc tl
-          end else begin                                    (* Found something. *)
-            let nacc = k inter value acc in
-            loop still_to_find nacc tl
-          end
+  let still_missing f s =
+    missingf "%s %s to find alleles: %s"
+      (Interval.to_string f) (Interval.to_string s)
+      (interval_set_to_string f)
+
+  type 'a find_res =
+    | Everything of 'a
+    | Rest of (Interval.t * Interval.t list * 'a)
+
+  let find to_find rest ~within ~f ~init =
+    let open Interval in
+    let rec loop find_me rest acc set =
+      match inter_diff find_me set with
+      | Before                -> still_missing find_me set
+      | After                 -> Rest (find_me, rest, acc)
+      | Inter { i; fst; snd } ->
+          (*let nacc = append i c.value acc in *)
+          let nacc = f i acc in
+          match snd with
+          | E | B _           -> (* Nothing left so continue fold. *)
+            begin match fst with
+              | S (m, _)
+              | B m                     -> still_missing m set
+              | A nfind_me              -> Rest (nfind_me, rest, nacc)
+              | E                       ->
+                  begin match rest with
+                    | []                -> Everything nacc
+                    | nfind_me :: nrest -> Rest (nfind_me, nrest, nacc)
+                  end
+            end
+          | S (_, a)
+          | A a ->
+              begin match fst with
+                | S (m, _) (* Case not possible, but for patter matching. *)
+                | B m                      -> still_missing m set
+                | A _                      -> assert false
+                | E                        ->
+                    begin match rest with
+                      | []                 -> Everything nacc
+                      | nto_find  :: nrest -> loop nto_find nrest nacc a
+                    end
+              end
     in
-    loop to_find init lst
+    loop to_find rest init within
 
-  let set_assoc_exn to_find lst =
-    set_assoc_k to_find lst
-      ~init:Nil
-      ~k:(fun to_find value acc -> cons to_find value acc)
+  let get_exn (type a) set l =
+    let module M = struct exception Found of a t end in
+    match intervals_of_allele_set set with
+    | []               -> empty
+    | find_me :: rest  ->
+      try
+        let still_to_find, _, _ =
+          fold_left l ~init:(find_me, rest, empty)
+            ~f:(fun (find_me, rest, init) within value ->
+                  let fr = 
+                    find find_me rest ~within ~init
+                      ~f:(fun intersect acc -> append intersect value acc)
+                  in
+                  match fr with
+                  | Everything nacc   -> raise (M.Found nacc)
+                  | Rest (fm, re, ac) -> (fm, re, ac))
+        in
+        missingf "didn't find: %s" (interval_set_to_string still_to_find)
+      with M.Found s -> s
 
-  let set_assoc to_find t =
-    try Some (set_assoc_exn to_find t)
-    with (StillMissing _) -> None
-
-  let get_exn = set_assoc_exn
-
-  let get = set_assoc
+  let get set l =
+    match get_exn set l with
+    | exception Missing _ -> None
+    | v                   -> Some v
 
   let get_value s t =
     Option.bind (get s t) ~f:(function
-      | Cons { value; _} -> Some value
+      | Some { value; _} -> Some value
       | _                -> None)
 
   let iter l ~f =
@@ -385,16 +509,19 @@ module Make (Aset : Alleles.Set) : M = struct
 
   let iter_values l ~f =
     iter l ~f:(fun set value ->
-      Aset.iter_set_indices set ~f:(fun i -> f i value))
+      Aset.iter_set_indices (interval_to_allele_set set)
+        ~f:(fun i -> f i value))
 
   let fold = fold_left
 
-  let absorb ?eq t ~init = fold_left t ~init ~f:(mutate_or_add ?eq)
+  (*let absorb ?eq t ~init = fold_left t ~init ~f:(mutate_or_add ?eq) 
 
   let fold_new ~f l = fold_left ~init:Nil ~f l
+*)
 
   let concat_map ?eq l ~f =
-    fold_new l ~f:(fun init s a -> absorb ?eq (f s a) ~init)
+    failwith "NI"
+    (* fold_new l ~f:(fun init s a -> absorb ?eq (f s a) ~init) *)
 
   (* The order of set arguments matters for performance. Better to fold over
      the longer list and lookup (set_assoc_k) into the shorter one. Remember
@@ -403,36 +530,84 @@ module Make (Aset : Alleles.Set) : M = struct
      automatically re-order functional arguments as necessary?
 
      Probably just need a better data structure. *)
-  let concat_map2 ?eq l ~by ~f =
-    fold_new l ~f:(fun init s a ->
-      set_assoc_k s by ~init ~k:(fun intersect b init ->
-        absorb ?eq (f intersect a b) ~init))
 
   let concat_map2_partial ?eq l ~by ~f ~missing =
-    fold_new l ~f:(fun init s a ->
+    failwith "NI"
+    (* fold_new l ~f:(fun init s a ->
       set_assoc_k s by ~init
         ~k:(fun intersect b init -> absorb ?eq (f intersect a b) ~init)
-        ~missing:(fun sm init -> absorb ?eq ~init (missing sm a)))
+        ~missing:(fun sm init -> absorb ?eq ~init (missing sm a))) *)
+
+  let map2_gen l1 l2 ~f =
+    let dd () = invalid_argf "map: Different domains." in
+    match l1, l2 with
+    | None,   None    -> None
+    | Some _, None
+    | None,   Some _  -> dd ()
+    | Some a, Some b  ->
+        let open Interval in
+        let step cs cv ds dv acc =
+          match inter_diff cs ds with
+          | Before
+          | After                 -> dd ()
+          | Inter {i; fst; snd }  ->
+              let nacc = f i cv dv acc in
+              match fst, snd with
+              | B _, _
+              | S _, _
+              | _,   B _
+              | _,   S _  -> dd ()
+              | E,   E    -> `Full nacc
+              | A a, E    -> `First (a, nacc)
+              | E,   A a  -> `Second (a, nacc)
+              | A _, A _  -> assert false
+        in
+        let rec loop cs cv cn ds dv dn acc =
+          match step cs cv ds dv acc with
+          | `Full acc           ->
+            if cn == a && dn == b then
+              acc (* Done *)
+            else if cn <> a && dn <> b then
+              loop cn.set cn.value cn.next dn.set dn.value dn.next acc
+            else
+              dd ()
+          | `First (csr, acc)   ->
+              if dn <> b then
+                loop csr cv cn dn.set dn.value dn.next acc
+              else
+                dd ()
+          | `Second (dsr, acc)  ->
+              if cn <> a then
+                loop cn.set cn.value cn.next dsr dv dn acc
+              else
+                dd ()
+        in
+        loop a.set a.value a.next b.set b.value b.next None
 
   let map2 ?eq l1 l2 ~f =
-    fold_new l1 ~f:(fun init s a ->
-      set_assoc_k s l2 ~init ~k:(fun intersect b acc ->
-        mutate_or_add ?eq acc intersect (f a b)))
+    map2_gen l1 l2 ~f:(fun intersect value1 value2 acc ->
+      append intersect (f value1 value2) acc)
+
+  let concat_map2 ?eq l ~by ~f =
+      map2_gen l by ~f:(fun intersect value1 value2 acc ->
+        append intersect (f value1 value2) acc)
+
+
 
   let map3 ?eq l1 l2 l3 ~f =
-    fold_new l1 ~f:(fun init is1 a ->
-      set_assoc_k ~n:"1" is1 l2 ~init ~k:(fun is2 b init ->
-        set_assoc_k ~n:"2" is2 l3 ~init ~k:(fun intersect c acc ->
-          mutate_or_add ?eq acc intersect (f a b c))))
-
+    map2 ?eq l3 (map2 ?eq l1 l2 ~f:(fun a b -> (a, b)))
+      ~f:(fun c (a, b) -> f a b c)
+    
   let map2_partial ?eq l ~by ~missing ~f =
-    fold_new l ~f:(fun init s a ->
+    failwith "NI"
+    (*fold_new l ~f:(fun init s a ->
       set_assoc_k s by ~init
         ~k:(fun intercept b acc -> mutate_or_add ?eq acc intercept (f a b))
-        ~missing:(fun sm init -> absorb ?eq ~init (missing sm a)))
+        ~missing:(fun sm init -> absorb ?eq ~init (missing sm a)))*)
 
   let map3_partial ?eq l ~by1 ~missing1 ~by2 ~missing2 ~f =
-    fold_new l ~f:(fun init is1 a ->
+    failwith "NI"
+    (* fold_new l ~f:(fun init is1 a ->
       let k is2 b init =
         let k2 intercept c acc = mutate_or_add ?eq acc intercept (f a b c) in
         set_assoc_k is2 by2 ~init ~k:k2
@@ -441,20 +616,22 @@ module Make (Aset : Alleles.Set) : M = struct
       in
       set_assoc_k is1 by1 ~init ~k
         ~missing:(fun sm init ->
-          fold_left (missing1 sm a) ~init ~f:(fun init s b -> k s b init)))
+          fold_left (missing1 sm a) ~init ~f:(fun init s b -> k s b init)))*)
 
   let init_everything v =
     let nothing = Aset.init () in
-    singleton (Aset.complement nothing) v
+    let everything = Aset.complement nothing in
+    of_allele_set everything v
 
   let partition_map l ~f =
-    let rec loop bs cs = function
+    failwith "NI"
+    (* let rec loop bs cs = function
       | Nil                     -> bs, cs
       | Cons { set; value; tl } ->
           match f set value with
           | `Fst b -> loop (cons set b bs) cs tl
           | `Snd c -> loop bs (cons set c cs) tl
     in
-    loop Nil Nil l
+    loop Nil Nil l *)
 
 end (* Make *)
