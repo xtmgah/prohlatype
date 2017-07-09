@@ -247,7 +247,7 @@ module LogProbabilities = struct
   let max   = max
 
   let close_enough x y =
-    close_enough x y
+    (x = y) || close_enough x y
 
   let constant = log10
 
@@ -476,6 +476,12 @@ module ForwardCalcs  (R : Ring) = struct
     ; delete = R.zero
     }
 
+  let gap_cell =
+    { match_ = R.gap
+    ; insert = R.gap
+    ; delete = R.gap
+    }
+
   let cells_close_enough c1 c2 =
     R.close_enough c1.match_ c2.match_
     && R.close_enough c1.insert c2.insert
@@ -580,6 +586,7 @@ module type Workspace_intf = sig
   type entry
   type final_entry
   type final_emission
+  type cell_storage
 
   val get : t -> i:int -> k:int -> entry
   val set : t -> i:int -> k:int -> entry -> unit
@@ -600,6 +607,8 @@ module type Workspace_intf = sig
   (* Reset for calculation. *)
   val clear : t -> unit
 
+  val cell_storage : t -> i:int -> k:int -> cell_storage
+
 end (* Workspace_intf *)
 
 module CommonWorkspace = struct
@@ -616,11 +625,12 @@ module CommonWorkspace = struct
      as we essentially just shift when GC work gets done. But this has a huge
      impact on total memory usage and is probably an important change as it
      will allow more instances of prohlatype to be run in parallel. *)
-  type ('entry, 'final_entry, 'final_emission) w =
-    { mutable forward   : 'entry array array
-    ; mutable final     : 'final_entry array
-    ; mutable emission  : 'final_emission
-    ; read_length       : int
+  type ('entry, 'final_entry, 'final_emission, 'cell_storage) w =
+    { mutable forward       : 'entry array array
+    ; mutable final         : 'final_entry array
+    ; mutable emission      : 'final_emission
+    ; read_length           : int
+    ; mutable cell_storage  : 'cell_storage array
     }
 
   let last_array_index arr =
@@ -664,16 +674,18 @@ module SingleWorkspace (R : Ring) :
   (Workspace_intf with type entry = R.t cell
                    and type final_entry = R.t
                    and type final_emission = R.t
-                   and type workspace_opt = unit) = struct
+                   and type workspace_opt = unit
+                   and type cell_storage = unit) = struct
 
   module Fc = ForwardCalcs(R)
 
   type entry = R.t cell
   type final_entry = R.t
   type final_emission = R.t
+  type cell_storage = unit
 
   include CommonWorkspace
-  type t = (entry, final_entry, final_emission) w
+  type t = (entry, final_entry, final_emission, cell_storage) w
 
   type workspace_opt = unit
 
@@ -682,6 +694,7 @@ module SingleWorkspace (R : Ring) :
     ; final    = Array.make ref_length R.zero
     ; emission = R.zero
     ; read_length
+    ; cell_storage  = [||]
     }
 
   let clear ws =
@@ -704,40 +717,55 @@ module SingleWorkspace (R : Ring) :
     close_in ic;
     ws
 
+  let cell_storage _t ~i ~k = ()
+
 end (* SingleWorkspace *)
 
 type 'a mt = (Pm.ascending, 'a) Pm.t
 
+
 (* Create and manage the workspace for the forward pass for multiple alleles.*)
 module MakeMultipleWorkspace (R : Ring) :
-  (Workspace_intf with type entry = R.t cell mt
+  (Workspace_intf with type entry = R.t cell Pmc.t
                    and type final_entry = R.t mt
                    and type final_emission = R.t array
-                   and type workspace_opt = int) = struct
+                   and type cell_storage = R.t cell array ref
+                   and type workspace_opt = int * R.t cell) = struct
 
-  type entry = R.t cell mt
+  type entry = R.t cell Pmc.t
   type final_entry = R.t mt
   type final_emission = R.t array
+  type cell_storage = R.t cell array ref
 
   include CommonWorkspace
-  type t = (entry, final_entry, final_emission) w
+  type t = (entry, final_entry, final_emission, cell_storage) w
 
-  type workspace_opt = int
+  type workspace_opt = int * R.t cell
 
-  let generate number_alleles ~ref_length ~read_length =
-    { forward   = Array.init 2 (*read_length*) ~f:(fun _ -> Array.make ref_length Pm.empty_a)
-    ; final     = Array.make ref_length Pm.empty_a
-    ; emission  = Array.make number_alleles R.zero
+  let empty_e : entry =
+    { Pmc.storage = ref [||]
+    ; Pmc.pm      = Pm.empty_a
+    }
+
+  let default_cell_storage = 200 (* 32 =  2^0 + 2^1 + 2^2 + 2^3 + 2^4 *)
+
+  let generate (number_alleles, gap_cell) ~ref_length ~read_length =
+    { forward     = Array.init 2 (*read_length*) ~f:(fun _ -> Array.make ref_length empty_e)
+    ; final       = Array.make ref_length Pm.empty_a
+    ; emission    = Array.make number_alleles R.zero
     ; read_length
+    ; cell_storage  = Array.init (ref_length * 2) ~f:(fun _ ->
+                        ref (Array.make default_cell_storage gap_cell))
     }
 
   let clear ws =
     let ref_length     = Array.length ws.final in
     let number_rows    = Array.length ws.forward in
     let number_alleles = Array.length ws.emission in
-    ws.forward <- Array.init number_rows ~f:(fun _ -> Array.make ref_length Pm.empty_a);
+    ws.forward <- Array.init number_rows ~f:(fun _ -> Array.make ref_length empty_e);
     ws.final   <- Array.make ref_length Pm.empty_a;
     Array.fill ws.emission ~pos:0 ~len:number_alleles R.zero
+    (* cell_storage is always blit before merge anyway. *)
 
   let save ws =
     let fname = Filename.temp_file ~temp_dir:"." "forward_workspace" "" in
@@ -751,6 +779,11 @@ module MakeMultipleWorkspace (R : Ring) :
     let ws : t = Marshal.from_channel ic in
     close_in ic;
     ws
+
+  let cell_storage t ~i ~k =
+    let ref_length = Array.length t.final in
+    let j = ref_length * (i mod 2) + k in
+    t.cell_storage.(j)
 
 end (* MakeMultipleWorkspace *)
 
@@ -956,8 +989,22 @@ module ForwardMultipleGen (R : Ring) = struct
   let cam_max =
     Pm.fold_values ~init:R.zero ~f:(fun m v -> R.max m v)
 
+  let per_allele_emission_arr len =
+    Array.make len R.one
+
+  module Fc = ForwardCalcs(R)
+  module E = struct
+    type t = R.t cell
+    let empty = Fc.gap_cell
+    let is_empty c = c == empty       (* Will this work? *)
+    let equal = Fc.cells_close_enough
+    let to_string = cell_to_string R.to_string
+  end
+
+  module Pmcc = Pmc.Make (E)
+
   let cam_max_cell =
-    Pm.fold_values ~init:R.zero ~f:(fun m c -> R.max m c.match_)
+    Pmcc.fold_values ~init:R.zero ~f:(fun m c -> R.max m c.match_)
 
   module W = MakeMultipleWorkspace(R)
 
@@ -981,11 +1028,6 @@ module ForwardMultipleGen (R : Ring) = struct
     ; spec_final_e     : int list list -> W.t -> R.t array
     }*)
 
-  let per_allele_emission_arr len =
-    Array.make len R.one
-
-  module Fc = ForwardCalcs(R)
-
   let recurrences ?insert_p tm read_length number_alleles =
     let r = Fc.g ?insert_p tm read_length in
 
@@ -993,37 +1035,49 @@ module ForwardMultipleGen (R : Ring) = struct
        precompute or memoize this calculation. The # of base errors isn't
        that large (<100) and there are only 4 bases. So we could be performing
        the same lookup. *)
-    let _eq = Fc.cells_close_enough in
     let to_em_set obsp emissions =
       Pm.map emissions ~f:(Option.value_map ~default:R.gap ~f:(Fc.to_match_prob obsp))
     in
-    let zero_cell_pm = Pm.init_all_a ~size:(number_alleles - 1) Fc.zero_cell in
+    let zero_cell_pm = Pmcc.of_ascending_pm (Pm.init_all_a ~size:(number_alleles - 1) Fc.zero_cell) in
     let start ws obsp base ~k =
+      (*printf "start: %d\n%!" k; *)
       let ems = to_em_set obsp base in
       let prev_pm = if k = 0 then zero_cell_pm else W.get ws ~i:0 ~k:(k-1) in
-      let m2 = Pm.merge ems prev_pm r.start in
+      let storage = W.cell_storage ws ~i:0 ~k in
+      let m2 = Pmcc.half_merge storage ems prev_pm r.start in
+      (*let m2 = Pm.merge ems prev_pm r.start in *)
       (*printf "start:k: %d pm_length: %d: %s\n%!" k (Pm.length m2)
         (Pm.to_string m2 (cell_to_string R.to_string)); *)
       m2
     in
     let fst_col ws obsp emissions ~i =
-      Pm.merge (to_em_set obsp emissions) (W.get ws ~i:(i-1) ~k:0)
-        r.fst_col
+      (*printf "fst_col: %d\n%!" i; *)
+      let ems = to_em_set obsp emissions in
+      let storage = W.cell_storage ws ~i ~k:0 in
+      Pmcc.half_merge storage ems (W.get ws ~i:(i-1) ~k:0) r.fst_col
+      (*Pm.merge ems  (W.get ws ~i:(i-1) ~k:0) r.fst_col *)
     in
     let middle ws obsp emissions ~i ~k =
+      (*printf "middle: %d %d\n%!" i k; *)
       let matches = W.get ws ~i:(i-1) ~k:(k-1) in
       let inserts = W.get ws ~i:(i-1) ~k       in
       let deletes = W.get ws ~i       ~k:(k-1) in
       let ems = to_em_set obsp emissions in
-      (*printf "at i: %d k: %d: e: %d, m: %d, i: %d, d: %d \n%!"
+      let storage = W.cell_storage ws ~i ~k in
+      Pmcc.quarter_merge4 storage ems matches inserts deletes
+        (fun emission_p match_c insert_c delete_c ->
+          r.middle emission_p ~insert_c ~delete_c ~match_c)
+(*    printf "at i: %d k: %d: e: %d, m: %d, i: %d, d: %d \n%!"
         i k (Pm.length ems) (Pm.length matches) (Pm.length inserts)
-            (Pm.length deletes); *)
+            (Pm.length deletes);
       Pm.merge4 ems matches inserts deletes
         (fun emission_p match_c insert_c delete_c ->
           r.middle emission_p ~insert_c ~delete_c ~match_c)
+          *)
     in
     let end_ ws k =
-      Pm.map (W.get ws ~i:(read_length-1) ~k) ~f:r.end_
+      let fr = Pmcc.to_regular_pm (W.get ws ~i:(read_length-1) ~k) in
+      Pm.map fr ~f:r.end_
     in
     let update_emission_from_cam em l =
       let open R in
@@ -1587,7 +1641,7 @@ let setup_single_pass ?band ?insert_p ?max_number_mismatches read_length t =
   let tm = Phmm.TransitionMatrix.init ~ref_length read_length in
   let module F = ForwardMLogSpace in
   let r(*, br*) = F.recurrences ?insert_p tm read_length number_alleles in
-  let ws = F.W.generate number_alleles ref_length read_length in
+  let ws = F.W.generate (number_alleles, F.Fc.zero_cell) ref_length read_length in
   let last_read_index = read_length - 1 in
   let best_alleles n =
     let alleles = Array.map ~f:fst alleles in
